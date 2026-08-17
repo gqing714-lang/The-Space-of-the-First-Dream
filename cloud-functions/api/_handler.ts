@@ -307,6 +307,13 @@ async function characters(request: Request) {
   return responseJson({ characters: await readCharacters() });
 }
 
+async function members(request: Request) {
+  const user = await currentUser(request);
+  if (!user) return error("请先登录", 401);
+  const [admin, friend] = await Promise.all([getUser("qing"), getUser("friend")]);
+  return responseJson({ users: [admin, friend].filter(Boolean).map(item => publicUser(item as StoredUser)) });
+}
+
 function characterPayload(body: Record<string, unknown>, existing?: StoredCharacter): StoredCharacter {
   const name = cleanName(body.name, existing?.name || "未命名角色");
   const color = typeof body.color === "string" && /^#[0-9a-f]{6}$/i.test(body.color)
@@ -458,6 +465,7 @@ export async function onRequest({ request }: { request: Request }) {
     if (request.method === "GET" && path === "/api/session") return await session(request);
     if (request.method === "GET" && path === "/api/feed") return await feed(request);
     if (request.method === "GET" && path === "/api/characters") return await characters(request);
+    if (request.method === "GET" && path === "/api/members") return await members(request);
 
     if (request.method !== "GET" && !ensureSameOrigin(request)) return error("请求来源无效", 403);
     if (request.method === "POST" && path === "/api/setup") return await setup(request);
