@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 type IconName =
@@ -41,10 +41,11 @@ function Icon({ name, size = 19 }: { name: IconName; size?: number }) {
 }
 
 type Character = { id: string; name: string; note: string; color: string; initial: string; enabled: boolean; book: string };
-type Moment = { id: string; author: string; initial: string; role: string; time: string; text: string; color: string; image?: "rain" | "night" | "paper"; likedBy: string[]; comments: { name: string; text: string }[] };
+type Moment = { id: string; author: string; initial: string; role: string; time: string; createdAt?: string; text: string; color: string; image?: "rain" | "night" | "paper"; likedBy: string[]; comments: { name: string; text: string; createdAt?: string }[] };
 type Draft = { id: string; characterId: string; author: string; initial: string; color: string; text: string };
 type ReplyDraft = Draft & { momentId: string };
 type AvatarShape = "organic" | "round" | "square";
+type LoginUser = { id: "qing" | "friend"; displayName: string; role: "admin" | "member"; initial: string; color: string };
 
 const avatarShapeOptions: { value: AvatarShape; label: string }[] = [
   { value: "organic", label: "原本" },
@@ -58,12 +59,6 @@ const initialCharacters: Character[] = [
   { id: "nanzhi", name: "南枝", note: "温柔、敏锐，喜欢记录雨天与旧物。", color: "#d7728d", initial: "枝", enabled: true, book: "雾港旧闻" },
   { id: "yuke", name: "雨客", note: "寡言的夜行者，说话短而有画面感。", color: "#5f6f88", initial: "雨", enabled: true, book: "共用世界书" },
   { id: "shisui", name: "时穗", note: "热衷甜点和植物，总能发现小小的好事。", color: "#b784a7", initial: "穗", enabled: true, book: "无绑定" },
-];
-
-const initialMoments: Moment[] = [
-  { id: "m1", author: "南枝", initial: "枝", role: "AI 成员", time: "今天 00:17", color: "#d7728d", text: "雨停以后，窗沿留了一小排亮晶晶的水。忽然觉得，夜晚也会把没说完的话整齐收好。", image: "rain", likedBy: ["青", "好友"], comments: [{ name: "青", text: "我也看到啦，像一串很小的灯。" }, { name: "南枝", text: "那就替它们留到天亮吧。" }] },
-  { id: "m2", author: "好友", initial: "友", role: "真人成员", time: "昨天 23:42", color: "#7186a2", text: "给今天打个七分。剩下三分，留给明天的奶茶和睡到自然醒。", image: "paper", likedBy: ["青", "时穗"], comments: [{ name: "时穗", text: "奶茶那一分我可以帮忙验收。" }] },
-  { id: "m3", author: "雨客", initial: "雨", role: "AI 成员", time: "昨天 21:08", color: "#5f6f88", text: "路灯把影子拉得很长。我绕了一点远路，刚好把风听完。", image: "night", likedBy: ["南枝"], comments: [] },
 ];
 
 const navItems = [
@@ -87,6 +82,31 @@ const replySeeds: Record<string, (moment: Moment) => string> = {
   shisui: () => `收到这份近况啦。下次再遇到这样的时刻，也记得分我一点。`,
 };
 
+function momentTime(createdAt?: string) {
+  if (!createdAt) return "刚刚";
+  const time = new Date(createdAt);
+  const elapsed = Date.now() - time.getTime();
+  if (elapsed < 60_000) return "刚刚";
+  if (elapsed < 60 * 60_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
+  const now = new Date();
+  const sameDay = now.toDateString() === time.toDateString();
+  if (sameDay) return `今天 ${time.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  if (yesterday.toDateString() === time.toDateString()) return `昨天 ${time.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+  return time.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+}
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    credentials: "same-origin",
+    headers: init?.body ? { "Content-Type": "application/json", ...(init.headers || {}) } : init?.headers,
+  });
+  const data = await response.json().catch(() => ({})) as T & { error?: string };
+  if (!response.ok) throw new Error(data.error || "暂时无法连接一梦间");
+  return data;
+}
+
 function Avatar({ initial, color, size = "md", online = false, src }: { initial: string; color: string; size?: "sm" | "md" | "lg" | "xl"; online?: boolean; src?: string }) {
   return <span className={`avatar avatar-${size} ${src ? "has-photo" : ""}`} style={{ "--avatar-color": color } as React.CSSProperties}><span className={src ? "avatar-photo" : ""} style={src ? { backgroundImage: `url(${JSON.stringify(src)})` } : undefined}>{src ? "" : initial}</span>{online && <i />}</span>;
 }
@@ -101,9 +121,15 @@ function Segmented({ value, onChange, options, small = false }: { value: string;
 
 export default function Home() {
   const [loggedIn, setLoggedIn] = useState(false);
+  const [bootState, setBootState] = useState<"loading" | "setup" | "login" | "ready">("loading");
+  const [availableUsers, setAvailableUsers] = useState<LoginUser[]>([]);
+  const [sessionUser, setSessionUser] = useState<LoginUser | null>(null);
   const [loginProfile, setLoginProfile] = useState<"qing" | "friend">("qing");
   const [showPassword, setShowPassword] = useState(false);
   const [password, setPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [setupForm, setSetupForm] = useState({ adminName: "青", adminPassword: "", friendName: "好友", friendPassword: "" });
   const [mode, setMode] = useState<"life" | "admin">("life");
   const [active, setActive] = useState("feed");
   const [style, setStyle] = useState<"glass" | "pixel">("glass");
@@ -111,12 +137,12 @@ export default function Home() {
   const [themeOpen, setThemeOpen] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerText, setComposerText] = useState("");
-  const [moments, setMoments] = useState(initialMoments);
+  const [moments, setMoments] = useState<Moment[]>([]);
   const [characters, setCharacters] = useState(initialCharacters);
   const [selectedCharacters, setSelectedCharacters] = useState<string[]>(["nanzhi", "yuke", "shisui"]);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [batchState, setBatchState] = useState<"idle" | "running" | "done">("idle");
-  const [replyMomentId, setReplyMomentId] = useState(initialMoments[1].id);
+  const [replyMomentId, setReplyMomentId] = useState("");
   const [replyCharacterIds, setReplyCharacterIds] = useState<string[]>(["nanzhi", "yuke", "shisui"]);
   const [replyDrafts, setReplyDrafts] = useState<ReplyDraft[]>([]);
   const [replyBatchState, setReplyBatchState] = useState<"idle" | "running" | "done">("idle");
@@ -143,9 +169,12 @@ export default function Home() {
   const importRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
-  const isAdmin = loginProfile === "qing";
-  const currentUser = loginProfile === "qing" ? { name: "青", initial: "青", color: "#c46483" } : { name: "好友", initial: "友", color: "#7186a2" };
-  const avatarShape = avatarShapes[loginProfile];
+  const selectedLoginUser = availableUsers.find(user => user.id === loginProfile);
+  const activeAccount = sessionUser ?? selectedLoginUser ?? { id: loginProfile, displayName: loginProfile === "qing" ? "青" : "好友", role: loginProfile === "qing" ? "admin" as const : "member" as const, initial: loginProfile === "qing" ? "青" : "友", color: loginProfile === "qing" ? "#c46483" : "#7186a2" };
+  const isAdmin = sessionUser?.role === "admin";
+  const currentUser = { name: activeAccount.displayName, initial: activeAccount.initial, color: activeAccount.color };
+  const otherUser = availableUsers.find(user => user.id !== sessionUser?.id) ?? availableUsers.find(user => user.id === "friend");
+  const avatarShape = avatarShapes[sessionUser?.id ?? loginProfile];
 
   useEffect(() => {
     const savedStyle = window.localStorage.getItem("yimeng-style") as "glass" | "pixel" | null;
@@ -171,6 +200,61 @@ export default function Home() {
     return () => window.cancelAnimationFrame(frame);
   }, []);
 
+  const refreshMoments = useCallback(async (quiet = false) => {
+    try {
+      const data = await apiRequest<{ posts: Moment[] }>("/api/feed");
+      const next = data.posts.map(post => ({ ...post, time: momentTime(post.createdAt) }));
+      setMoments(next);
+      setReplyMomentId(current => current && next.some(post => post.id === current) ? current : next[0]?.id ?? "");
+    } catch (caught) {
+      if (!quiet) setToast(caught instanceof Error ? caught.message : "动态同步失败");
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const boot = async () => {
+      try {
+        const status = await apiRequest<{ initialized: boolean; users: LoginUser[] }>("/api/status");
+        if (!active) return;
+        setAvailableUsers(status.users);
+        if (status.users.length) setLoginProfile(status.users[0].id);
+        if (!status.initialized) {
+          setBootState("setup");
+          return;
+        }
+        try {
+          const current = await apiRequest<{ user: LoginUser }>("/api/session");
+          if (!active) return;
+          setSessionUser(current.user);
+          setLoggedIn(true);
+          setBootState("ready");
+          await refreshMoments(true);
+        } catch {
+          if (active) setBootState("login");
+        }
+      } catch (caught) {
+        if (!active) return;
+        setAuthError(caught instanceof Error ? caught.message : "暂时无法连接云端");
+        setAvailableUsers([
+          { id: "qing", displayName: "青", role: "admin", initial: "青", color: "#c46483" },
+          { id: "friend", displayName: "好友", role: "member", initial: "友", color: "#7186a2" },
+        ]);
+        setBootState("login");
+      }
+    };
+    void boot();
+    return () => { active = false; };
+  }, [refreshMoments]);
+
+  useEffect(() => {
+    if (!loggedIn) return;
+    const refresh = () => { void refreshMoments(true); };
+    const timer = window.setInterval(refresh, 12_000);
+    window.addEventListener("focus", refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [loggedIn, refreshMoments]);
+
   useEffect(() => {
     window.localStorage.setItem("yimeng-style", style);
     window.localStorage.setItem("yimeng-palette", palette);
@@ -186,8 +270,9 @@ export default function Home() {
   const profileInfo = profileName ? (() => {
     const character = characters.find(item => item.name === profileName);
     if (character) return { name: character.name, initial: character.initial, color: character.color, role: "AI 成员", bio: character.note, detail: character.book };
-    if (profileName === "青") return { name: "青", initial: "青", color: "#c46483", role: "真人成员", bio: "一梦间的创建者。把日常、朋友和故事里的人安放在同一个小世界。", detail: "管理员" };
-    return { name: profileName, initial: profileName.slice(0, 1), color: "#7186a2", role: "真人成员", bio: "与你一起住在一梦间的朋友。个人简介可以稍后慢慢补上。", detail: "受邀成员" };
+    const member = availableUsers.find(user => user.displayName === profileName);
+    if (member?.role === "admin") return { name: member.displayName, initial: member.initial, color: member.color, role: "真人成员", bio: "一梦间的创建者。把日常、朋友和故事里的人安放在同一个小世界。", detail: "管理员" };
+    return { name: member?.displayName ?? profileName, initial: member?.initial ?? profileName.slice(0, 1), color: member?.color ?? "#7186a2", role: "真人成员", bio: "与你一起住在一梦间的朋友。个人简介可以稍后慢慢补上。", detail: "受邀成员" };
   })() : null;
   const profileMoments = profileName ? moments.filter(moment => moment.author === profileName) : [];
   const profileLikes = profileMoments.reduce((total, moment) => total + moment.likedBy.length, 0);
@@ -248,9 +333,49 @@ export default function Home() {
     } catch { setToast("形状已切换，但当前浏览器无法保存"); }
   };
 
-  const login = (event: React.FormEvent) => {
-    event.preventDefault(); setLoggedIn(true); setMode("life"); setActive("feed");
-    setToast(`欢迎回来，${loginProfile === "qing" ? "青" : "好友"}`);
+  const finishLogin = async (user: LoginUser, users = availableUsers) => {
+    setSessionUser(user);
+    setAvailableUsers(users);
+    setLoginProfile(user.id);
+    setLoggedIn(true);
+    setBootState("ready");
+    setMode("life");
+    setActive("feed");
+    setPassword("");
+    setAuthError("");
+    await refreshMoments(true);
+    setToast(`欢迎回来，${user.displayName}`);
+  };
+
+  const initialize = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setAuthBusy(true); setAuthError("");
+    try {
+      const data = await apiRequest<{ user: LoginUser; users: LoginUser[] }>("/api/setup", { method: "POST", body: JSON.stringify(setupForm) });
+      await finishLogin(data.user, data.users);
+    } catch (caught) {
+      setAuthError(caught instanceof Error ? caught.message : "初始化失败");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const login = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setAuthBusy(true); setAuthError("");
+    try {
+      const data = await apiRequest<{ user: LoginUser }>("/api/login", { method: "POST", body: JSON.stringify({ userId: loginProfile, password }) });
+      await finishLogin(data.user);
+    } catch (caught) {
+      setAuthError(caught instanceof Error ? caught.message : "登录失败");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const logout = async () => {
+    try { await apiRequest<{ ok: boolean }>("/api/logout", { method: "POST", body: "{}" }); } catch { /* The local session is cleared either way. */ }
+    setSessionUser(null); setLoggedIn(false); setBootState("login"); setMode("life"); setActive("feed"); setMoments([]); setProfileName(null);
   };
 
   const goTo = (key: string) => {
@@ -264,20 +389,36 @@ export default function Home() {
     setMode(next as "life" | "admin"); setActive(next === "life" ? "feed" : "generate");
   };
 
-  const publishMoment = () => {
+  const savePost = async (text: string, actor?: { id: string; name: string; initial: string; color: string }) => {
+    const data = await apiRequest<{ post: Moment }>("/api/posts", { method: "POST", body: JSON.stringify({ text, actor }) });
+    const post = { ...data.post, time: momentTime(data.post.createdAt) };
+    setMoments(current => [post, ...current.filter(item => item.id !== post.id)]);
+    setReplyMomentId(current => current || post.id);
+    return post;
+  };
+
+  const publishMoment = async () => {
     if (!composerText.trim()) return;
-    setMoments(current => [{ id: `m-${Date.now()}`, author: currentUser.name, initial: currentUser.initial, role: "真人成员", time: "刚刚", color: currentUser.color, text: composerText.trim(), likedBy: [], comments: [] }, ...current]);
-    setComposerText(""); setComposerOpen(false); setToast("已经放进梦间了");
+    try {
+      await savePost(composerText.trim());
+      setComposerText(""); setComposerOpen(false); setToast("已经同步到梦间了");
+    } catch (caught) { setToast(caught instanceof Error ? caught.message : "发布失败"); }
   };
 
-  const toggleLike = (id: string) => {
-    setMoments(current => current.map(moment => moment.id === id ? { ...moment, likedBy: moment.likedBy.includes(currentUser.name) ? moment.likedBy.filter(name => name !== currentUser.name) : [...moment.likedBy, currentUser.name] } : moment));
+  const toggleLike = async (id: string) => {
+    try {
+      const data = await apiRequest<{ post: Moment }>("/api/post-action", { method: "POST", body: JSON.stringify({ postId: id, action: "like" }) });
+      setMoments(current => current.map(moment => moment.id === id ? { ...data.post, time: momentTime(data.post.createdAt) } : moment));
+    } catch (caught) { setToast(caught instanceof Error ? caught.message : "暂时无法喜欢这条动态"); }
   };
 
-  const addComment = (id: string) => {
+  const addComment = async (id: string) => {
     if (!commentText.trim()) return;
-    setMoments(current => current.map(moment => moment.id === id ? { ...moment, comments: [...moment.comments, { name: currentUser.name, text: commentText.trim() }] } : moment));
-    setCommentText(""); setCommentBox(null);
+    try {
+      const data = await apiRequest<{ post: Moment }>("/api/post-action", { method: "POST", body: JSON.stringify({ postId: id, action: "comment", text: commentText.trim() }) });
+      setMoments(current => current.map(moment => moment.id === id ? { ...data.post, time: momentTime(data.post.createdAt) } : moment));
+      setCommentText(""); setCommentBox(null);
+    } catch (caught) { setToast(caught instanceof Error ? caught.message : "回应没有发送成功"); }
   };
 
   const toggleCharacterSelection = (id: string) => setSelectedCharacters(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
@@ -314,23 +455,28 @@ export default function Home() {
     }, 1100);
   };
 
-  const publishReplyDraft = (id: string) => {
+  const publishReplyDraft = async (id: string) => {
     const draft = replyDrafts.find(item => item.id === id);
     if (!draft?.text.trim()) return;
-    setMoments(current => current.map(moment => moment.id === draft.momentId ? { ...moment, comments: [...moment.comments, { name: draft.author, text: draft.text.trim() }] } : moment));
-    setReplyDrafts(current => current.filter(item => item.id !== id));
-    setToast(`${draft.author}的回应已发布`);
+    try {
+      const data = await apiRequest<{ post: Moment }>("/api/post-action", { method: "POST", body: JSON.stringify({ postId: draft.momentId, action: "comment", text: draft.text.trim(), actor: { id: draft.characterId, name: draft.author, initial: draft.initial, color: draft.color } }) });
+      setMoments(current => current.map(moment => moment.id === draft.momentId ? { ...data.post, time: momentTime(data.post.createdAt) } : moment));
+      setReplyDrafts(current => current.filter(item => item.id !== id));
+      setToast(`${draft.author}的回应已同步`);
+    } catch (caught) { setToast(caught instanceof Error ? caught.message : "角色回应发布失败"); }
   };
 
-  const publishAllReplyDrafts = () => {
+  const publishAllReplyDrafts = async () => {
     const ready = replyDrafts.filter(draft => draft.text.trim());
     if (!ready.length) return;
-    setMoments(current => current.map(moment => {
-      const replies = ready.filter(draft => draft.momentId === moment.id).map(draft => ({ name: draft.author, text: draft.text.trim() }));
-      return replies.length ? { ...moment, comments: [...moment.comments, ...replies] } : moment;
-    }));
-    setReplyDrafts([]);
-    setToast(`${ready.length} 条角色回应已发布`);
+    try {
+      for (const draft of ready) {
+        const data = await apiRequest<{ post: Moment }>("/api/post-action", { method: "POST", body: JSON.stringify({ postId: draft.momentId, action: "comment", text: draft.text.trim(), actor: { id: draft.characterId, name: draft.author, initial: draft.initial, color: draft.color } }) });
+        setMoments(current => current.map(moment => moment.id === draft.momentId ? { ...data.post, time: momentTime(data.post.createdAt) } : moment));
+      }
+      setReplyDrafts([]);
+      setToast(`${ready.length} 条角色回应已同步`);
+    } catch (caught) { setToast(caught instanceof Error ? caught.message : "部分回应没有发布成功"); }
   };
 
   const runBatch = () => {
@@ -342,16 +488,21 @@ export default function Home() {
     }, 1200);
   };
 
-  const publishDraft = (id: string) => {
+  const publishDraft = async (id: string) => {
     const draft = drafts.find(item => item.id === id); if (!draft) return;
-    setMoments(current => [{ id: `m-${Date.now()}`, author: draft.author, initial: draft.initial, role: "AI 成员", time: "刚刚", color: draft.color, text: draft.text, likedBy: [], comments: [] }, ...current]);
-    setDrafts(current => current.filter(item => item.id !== id)); setToast(`${draft.author}的朋友圈已发布`);
+    try {
+      await savePost(draft.text, { id: draft.characterId, name: draft.author, initial: draft.initial, color: draft.color });
+      setDrafts(current => current.filter(item => item.id !== id)); setToast(`${draft.author}的朋友圈已同步`);
+    } catch (caught) { setToast(caught instanceof Error ? caught.message : "角色动态发布失败"); }
   };
 
-  const publishAllDrafts = () => {
+  const publishAllDrafts = async () => {
     if (!drafts.length) return;
-    const newMoments = drafts.map((draft, index) => ({ id: `m-${Date.now()}-${index}`, author: draft.author, initial: draft.initial, role: "AI 成员", time: "刚刚", color: draft.color, text: draft.text, likedBy: [], comments: [] }));
-    setMoments(current => [...newMoments, ...current]); setDrafts([]); setToast(`${newMoments.length} 条朋友圈已发布`);
+    try {
+      for (const draft of drafts) await savePost(draft.text, { id: draft.characterId, name: draft.author, initial: draft.initial, color: draft.color });
+      const count = drafts.length;
+      setDrafts([]); setToast(`${count} 条朋友圈已同步`);
+    } catch (caught) { setToast(caught instanceof Error ? caught.message : "部分角色动态没有发布成功"); }
   };
 
   const addCharacter = () => {
@@ -384,17 +535,32 @@ export default function Home() {
           <div className="constellation" aria-hidden="true"><span/><span/><span/><span/><i/><i/></div>
           <div className="privacy-note"><Icon name="shield" size={16}/><span>仅受邀成员可见 · 私密共享空间</span></div>
         </div>
-        <form className="login-card panel" onSubmit={login}>
-          <div className="login-card-head"><p>欢迎回来</p><span>请选择演示身份进入第一版</span></div>
+        {bootState === "loading" ? <section className="login-card panel login-loading"><span className="loader"/><div className="login-card-head"><p>正在唤醒一梦间</p><span>连接云端数据中……</span></div></section> : bootState === "setup" ? <form className="login-card panel setup-card" onSubmit={initialize}>
+          <div className="login-card-head"><p>第一次打开一梦间</p><span>创建两套真实帐密，保存后你会直接以管理员身份进入</span></div>
+          <div className="setup-person"><strong>你的帐户</strong><small>管理员</small></div>
+          <label className="field-label" htmlFor="admin-name">显示名称</label>
+          <div className="password-field"><Icon name="users" size={17}/><input id="admin-name" value={setupForm.adminName} onChange={event => setSetupForm(current => ({ ...current, adminName: event.target.value }))} maxLength={20}/></div>
+          <label className="field-label" htmlFor="admin-password">登录密码</label>
+          <div className="password-field"><Icon name="lock" size={17}/><input id="admin-password" type={showPassword ? "text" : "password"} value={setupForm.adminPassword} onChange={event => setSetupForm(current => ({ ...current, adminPassword: event.target.value }))} placeholder="至少 6 个字符" autoComplete="new-password"/><button type="button" onClick={() => setShowPassword(current => !current)} aria-label="显示密码"><Icon name="eye" size={17}/></button></div>
+          <div className="setup-person"><strong>朋友的帐户</strong><small>普通成员</small></div>
+          <label className="field-label" htmlFor="friend-name">显示名称</label>
+          <div className="password-field"><Icon name="users" size={17}/><input id="friend-name" value={setupForm.friendName} onChange={event => setSetupForm(current => ({ ...current, friendName: event.target.value }))} maxLength={20}/></div>
+          <label className="field-label" htmlFor="friend-password">登录密码</label>
+          <div className="password-field"><Icon name="lock" size={17}/><input id="friend-password" type={showPassword ? "text" : "password"} value={setupForm.friendPassword} onChange={event => setSetupForm(current => ({ ...current, friendPassword: event.target.value }))} placeholder="至少 6 个字符" autoComplete="new-password"/></div>
+          {authError && <p className="auth-error">{authError}</p>}
+          <button className="primary-button login-submit" type="submit" disabled={authBusy || setupForm.adminPassword.length < 6 || setupForm.friendPassword.length < 6}><span>{authBusy ? "正在创建……" : "创建并进入一梦间"}</span><Icon name="chevron" size={18}/></button>
+          <div className="prototype-note"><span>PRIVATE SETUP</span><p>密码只会以加密摘要保存在云端，请把朋友的密码单独告诉她。</p></div>
+        </form> : <form className="login-card panel" onSubmit={login}>
+          <div className="login-card-head"><p>欢迎回来</p><span>选择自己的身份并输入密码</span></div>
           <div className="profile-picker">
-            <button type="button" className={loginProfile === "qing" ? "selected" : ""} onClick={() => setLoginProfile("qing")}><Avatar initial="青" color="#c46483" size="lg" online src={avatarSources["青"]}/><span><strong>青</strong><small>管理员</small></span><i className="profile-check"><Icon name="check" size={13}/></i></button>
-            <button type="button" className={loginProfile === "friend" ? "selected" : ""} onClick={() => setLoginProfile("friend")}><Avatar initial="友" color="#7186a2" size="lg" src={avatarSources["好友"]}/><span><strong>好友</strong><small>普通成员</small></span><i className="profile-check"><Icon name="check" size={13}/></i></button>
+            {availableUsers.map(user => <button type="button" key={user.id} className={loginProfile === user.id ? "selected" : ""} onClick={() => { setLoginProfile(user.id); setAuthError(""); }}><Avatar initial={user.initial} color={user.color} size="lg" online={user.role === "admin"} src={avatarSources[user.displayName]}/><span><strong>{user.displayName}</strong><small>{user.role === "admin" ? "管理员" : "普通成员"}</small></span><i className="profile-check"><Icon name="check" size={13}/></i></button>)}
           </div>
           <label className="field-label" htmlFor="password">密码</label>
-          <div className="password-field"><Icon name="lock" size={17}/><input id="password" type={showPassword ? "text" : "password"} value={password} onChange={event => setPassword(event.target.value)} placeholder="演示版可直接进入"/><button type="button" onClick={() => setShowPassword(current => !current)} aria-label="显示密码"><Icon name="eye" size={17}/></button></div>
-          <button className="primary-button login-submit" type="submit"><span>进入一梦间</span><Icon name="chevron" size={18}/></button>
-          <div className="prototype-note"><span>INTERACTIVE PREVIEW</span><p>这是可交互界面稿；正式联机时才会启用真实帐密与加密存储。</p></div>
-        </form>
+          <div className="password-field"><Icon name="lock" size={17}/><input id="password" type={showPassword ? "text" : "password"} value={password} onChange={event => setPassword(event.target.value)} placeholder="请输入密码" autoComplete="current-password"/><button type="button" onClick={() => setShowPassword(current => !current)} aria-label="显示密码"><Icon name="eye" size={17}/></button></div>
+          {authError && <p className="auth-error">{authError}</p>}
+          <button className="primary-button login-submit" type="submit" disabled={authBusy || !password}><span>{authBusy ? "正在登录……" : "进入一梦间"}</span><Icon name="chevron" size={18}/></button>
+          <div className="prototype-note"><span>CLOUD SYNC</span><p>真实帐密登录 · 动态、喜欢与回应会在两台设备间同步。</p></div>
+        </form>}
       </section>
     </main>;
   }
@@ -407,22 +573,22 @@ export default function Home() {
       <div className="top-actions"><div className="theme-wrap">
         <button className="icon-button theme-trigger" type="button" onClick={() => setThemeOpen(current => !current)} aria-label="切换外观"><span className="theme-swatch"/><Icon name="chevron" size={14}/></button>
         {themeOpen && <div className="theme-popover panel"><div><span className="popover-label">界面质感</span><Segmented value={style} onChange={value => setStyle(value as "glass" | "pixel")} options={[{ value: "glass", label: "毛玻璃", icon: "spark" }, { value: "pixel", label: "像素", icon: "grid" }]} small/></div><div><span className="popover-label">梦境配色</span><div className="palette-options"><button className={palette === "pink" ? "active" : ""} onClick={() => setPalette("pink")}><i className="pink-dot"/>柔粉</button><button className={palette === "ink" ? "active" : ""} onClick={() => setPalette("ink")}><i className="ink-dot"/>黑白</button></div></div></div>}
-      </div><button className="profile-button" type="button" onClick={() => openProfile(currentUser.name)} aria-label={`打开${currentUser.name}的主页`}><Avatar initial={currentUser.initial} color={currentUser.color} size="sm" online src={avatarSources[currentUser.name]}/><span>{currentUser.name}</span><Icon name="chevron" size={16}/></button></div>
+      </div><button className="profile-button" type="button" onClick={() => openProfile(currentUser.name)} aria-label={`打开${currentUser.name}的主页`}><Avatar initial={currentUser.initial} color={currentUser.color} size="sm" online src={avatarSources[currentUser.name]}/><span>{currentUser.name}</span><Icon name="chevron" size={16}/></button><button className="icon-button logout-button" type="button" onClick={logout} aria-label="退出登录"><Icon name="logout" size={18}/></button></div>
     </header>
 
     {mode === "life" ? <div className="life-layout page-wrap">
       <aside className="side-rail panel-soft"><nav>{navItems.slice(0, 2).map(item => <button type="button" key={item.key} className={active === item.key ? "active" : ""} onClick={() => goTo(item.key)}><Icon name={item.icon}/><span>{item.label}</span></button>)}</nav><div className="rail-line"/><div className="rail-avatar-stack">{enabledCharacters.slice(0, 3).map(character => <button type="button" key={character.id} onClick={() => openProfile(character.name)} aria-label={`查看${character.name}的主页`}><Avatar initial={character.initial} color={character.color} size="sm" online src={avatarSources[character.name]}/></button>)}</div>{isAdmin && <button className="rail-admin" type="button" onClick={() => toggleMode("admin")}><Icon name="settings"/><span>后台</span></button>}</aside>
       <section className="feed-column">
-        <div className="feed-heading"><div><p className="eyebrow">PRIVATE SOCIAL DIARY</p><h1>一梦间</h1></div><span>{moments.length} 篇新动态</span></div>
+        <div className="feed-heading"><div><p className="eyebrow">PRIVATE SOCIAL DIARY</p><h1>一梦间</h1></div><span>{moments.length ? `${moments.length} 篇动态` : "云端已连接"}</span></div>
         <div className="story-strip panel" aria-label="成员近况">
           <button className="story-item your-story" type="button" onClick={() => openProfile(currentUser.name)}>
             <span className="story-ring"><Avatar initial={currentUser.initial} color={currentUser.color} size="lg" src={avatarSources[currentUser.name]}/></span><i className="story-plus"><Icon name="plus" size={12}/></i><small>你的主页</small>
           </button>
-          <button className="story-item" type="button" onClick={() => openProfile("好友")}><span className="story-ring"><Avatar initial="友" color="#7186a2" size="lg" src={avatarSources["好友"]}/></span><small>好友</small></button>
+          {otherUser && <button className="story-item" type="button" onClick={() => openProfile(otherUser.displayName)}><span className="story-ring"><Avatar initial={otherUser.initial} color={otherUser.color} size="lg" src={avatarSources[otherUser.displayName]}/></span><small>{otherUser.displayName}</small></button>}
           {enabledCharacters.slice(0, 3).map(character => <button className="story-item" type="button" key={character.id} onClick={() => openProfile(character.name)}><span className="story-ring ai-story"><Avatar initial={character.initial} color={character.color} size="lg" src={avatarSources[character.name]}/></span><small>{character.name}</small></button>)}
         </div>
         <button className="composer panel" type="button" onClick={() => setComposerOpen(true)}><Avatar initial={currentUser.initial} color={currentUser.color} size="sm" src={avatarSources[currentUser.name]}/><span>分享此刻的照片或心情……</span><i><Icon name="image" size={18}/></i><b><Icon name="plus" size={17}/></b></button>
-        <div className="feed-list">{moments.map(moment => <article className={`moment-card panel ${moment.image ? "has-image" : "text-post"}`} key={moment.id}>
+        <div className="feed-list">{moments.length === 0 && <div className="empty-feed panel"><span><Icon name="spark" size={25}/></span><h3>这里还很安静</h3><p>发布第一条动态后，它会同步到你们两个人的设备。</p></div>}{moments.map(moment => <article className={`moment-card panel ${moment.image ? "has-image" : "text-post"}`} key={moment.id}>
           <header>
             <button className="post-avatar-button" type="button" onClick={() => openProfile(moment.author)} aria-label={`查看${moment.author}的主页`}><span className="post-avatar-ring"><Avatar initial={moment.initial} color={moment.color} size="sm" src={avatarSources[moment.author]}/></span></button>
             <div><div className="author-line"><button type="button" onClick={() => openProfile(moment.author)}>{moment.author}</button></div><small>{moment.time}</small></div>
@@ -438,7 +604,7 @@ export default function Home() {
           {commentBox === moment.id && <div className="comment-compose"><input autoFocus value={commentText} onChange={event => setCommentText(event.target.value)} onKeyDown={event => { if (event.key === "Enter") addComment(moment.id); }} placeholder={`回应 ${moment.author}…`}/><button type="button" onClick={() => addComment(moment.id)}><Icon name="send" size={15}/></button></div>}
         </article>)}</div>
       </section>
-      <aside className="right-rail"><section className="dream-status panel"><div className="section-title"><div><Icon name="spark" size={17}/><span>此刻在线</span></div><small>{enabledCharacters.length + 2} / {characters.length + 2}</small></div><div className="online-list"><button type="button" onClick={() => openProfile("好友")}><Avatar initial="友" color="#7186a2" size="sm" online src={avatarSources["好友"]}/><span><strong>好友</strong><small>刚刚看过</small></span></button>{enabledCharacters.slice(0, 3).map(character => <button type="button" key={character.id} onClick={() => openProfile(character.name)}><Avatar initial={character.initial} color={character.color} size="sm" online src={avatarSources[character.name]}/><span><strong>{character.name}</strong><small>刚刚在线</small></span></button>)}</div></section>
+      <aside className="right-rail"><section className="dream-status panel"><div className="section-title"><div><Icon name="spark" size={17}/><span>此刻在线</span></div><small>{enabledCharacters.length + availableUsers.length} / {characters.length + availableUsers.length}</small></div><div className="online-list">{otherUser && <button type="button" onClick={() => openProfile(otherUser.displayName)}><Avatar initial={otherUser.initial} color={otherUser.color} size="sm" online src={avatarSources[otherUser.displayName]}/><span><strong>{otherUser.displayName}</strong><small>受邀成员</small></span></button>}{enabledCharacters.slice(0, 3).map(character => <button type="button" key={character.id} onClick={() => openProfile(character.name)}><Avatar initial={character.initial} color={character.color} size="sm" online src={avatarSources[character.name]}/><span><strong>{character.name}</strong><small>刚刚在线</small></span></button>)}</div></section>
         {isAdmin && <section className="quick-generate panel"><div className="magic-orbit"><Icon name="wand" size={24}/></div><p className="eyebrow">ADMIN SHORTCUT</p><h3>让角色写点什么</h3><p>一次生成多位角色的朋友圈，各自保存成草稿。</p><button className="secondary-button" type="button" onClick={() => goTo("generate")}><span>进入生成所</span><Icon name="chevron" size={16}/></button></section>}
         <section className="tiny-note"><span>今日小笺</span><p>“梦不必很大，够两个人一起记住就好。”</p></section>
       </aside>
