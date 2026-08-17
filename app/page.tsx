@@ -40,12 +40,12 @@ function Icon({ name, size = 19 }: { name: IconName; size?: number }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
-type Character = { id: string; name: string; note: string; color: string; initial: string; enabled: boolean; book: string };
+type Character = { id: string; name: string; note: string; greeting?: string; color: string; initial: string; enabled: boolean; book: string };
 type Moment = { id: string; author: string; initial: string; role: string; time: string; createdAt?: string; text: string; color: string; image?: "rain" | "night" | "paper"; likedBy: string[]; comments: { name: string; text: string; createdAt?: string }[] };
 type Draft = { id: string; characterId: string; author: string; initial: string; color: string; text: string };
 type ReplyDraft = Draft & { momentId: string };
 type AvatarShape = "organic" | "round" | "square";
-type LoginUser = { id: "qing" | "friend"; displayName: string; role: "admin" | "member"; initial: string; color: string };
+type LoginUser = { id: "qing" | "friend"; displayName: string; role: "admin" | "member"; initial: string; color: string; signature: string };
 
 const avatarShapeOptions: { value: AvatarShape; label: string }[] = [
   { value: "organic", label: "原本" },
@@ -156,6 +156,8 @@ export default function Home() {
   ]);
   const [worldModal, setWorldModal] = useState(false);
   const [characterModal, setCharacterModal] = useState(false);
+  const [editingCharacterId, setEditingCharacterId] = useState<string | null>(null);
+  const [characterBusy, setCharacterBusy] = useState(false);
   const [newCharacter, setNewCharacter] = useState({ name: "", description: "", greeting: "" });
   const [apiKey, setApiKey] = useState("");
   const [apiBase, setApiBase] = useState("https://api.example.com/v1");
@@ -163,6 +165,9 @@ export default function Home() {
   const [apiTest, setApiTest] = useState<"idle" | "testing" | "ok">("idle");
   const [profileName, setProfileName] = useState<string | null>(null);
   const [profileTab, setProfileTab] = useState<"grid" | "timeline">("grid");
+  const [signatureModal, setSignatureModal] = useState(false);
+  const [signatureDraft, setSignatureDraft] = useState("");
+  const [signatureBusy, setSignatureBusy] = useState(false);
   const [avatarSources, setAvatarSources] = useState<Record<string, string>>({});
   const [avatarTarget, setAvatarTarget] = useState<string | null>(null);
   const [avatarShapes, setAvatarShapes] = useState<Record<"qing" | "friend", AvatarShape>>({ qing: "organic", friend: "organic" });
@@ -170,7 +175,7 @@ export default function Home() {
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
   const selectedLoginUser = availableUsers.find(user => user.id === loginProfile);
-  const activeAccount = sessionUser ?? selectedLoginUser ?? { id: loginProfile, displayName: loginProfile === "qing" ? "青" : "好友", role: loginProfile === "qing" ? "admin" as const : "member" as const, initial: loginProfile === "qing" ? "青" : "友", color: loginProfile === "qing" ? "#c46483" : "#7186a2" };
+  const activeAccount = sessionUser ?? selectedLoginUser ?? { id: loginProfile, displayName: loginProfile === "qing" ? "青" : "好友", role: loginProfile === "qing" ? "admin" as const : "member" as const, initial: loginProfile === "qing" ? "青" : "友", color: loginProfile === "qing" ? "#c46483" : "#7186a2", signature: "" };
   const isAdmin = sessionUser?.role === "admin";
   const currentUser = { name: activeAccount.displayName, initial: activeAccount.initial, color: activeAccount.color };
   const otherUser = availableUsers.find(user => user.id !== sessionUser?.id) ?? availableUsers.find(user => user.id === "friend");
@@ -211,6 +216,18 @@ export default function Home() {
     }
   }, []);
 
+  const refreshCharacters = useCallback(async (quiet = false) => {
+    try {
+      const data = await apiRequest<{ characters: Character[] }>("/api/characters");
+      setCharacters(data.characters);
+      const availableIds = new Set(data.characters.map(character => character.id));
+      setSelectedCharacters(current => current.filter(id => availableIds.has(id)));
+      setReplyCharacterIds(current => current.filter(id => availableIds.has(id)));
+    } catch (caught) {
+      if (!quiet) setToast(caught instanceof Error ? caught.message : "角色同步失败");
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
     const boot = async () => {
@@ -229,7 +246,7 @@ export default function Home() {
           setSessionUser(current.user);
           setLoggedIn(true);
           setBootState("ready");
-          await refreshMoments(true);
+          await Promise.all([refreshMoments(true), refreshCharacters(true)]);
         } catch {
           if (active) setBootState("login");
         }
@@ -237,15 +254,15 @@ export default function Home() {
         if (!active) return;
         setAuthError(caught instanceof Error ? caught.message : "暂时无法连接云端");
         setAvailableUsers([
-          { id: "qing", displayName: "青", role: "admin", initial: "青", color: "#c46483" },
-          { id: "friend", displayName: "好友", role: "member", initial: "友", color: "#7186a2" },
+          { id: "qing", displayName: "青", role: "admin", initial: "青", color: "#c46483", signature: "" },
+          { id: "friend", displayName: "好友", role: "member", initial: "友", color: "#7186a2", signature: "" },
         ]);
         setBootState("login");
       }
     };
     void boot();
     return () => { active = false; };
-  }, [refreshMoments]);
+  }, [refreshCharacters, refreshMoments]);
 
   useEffect(() => {
     if (!loggedIn) return;
@@ -271,8 +288,8 @@ export default function Home() {
     const character = characters.find(item => item.name === profileName);
     if (character) return { name: character.name, initial: character.initial, color: character.color, role: "AI 成员", bio: character.note, detail: character.book };
     const member = availableUsers.find(user => user.displayName === profileName);
-    if (member?.role === "admin") return { name: member.displayName, initial: member.initial, color: member.color, role: "真人成员", bio: "一梦间的创建者。把日常、朋友和故事里的人安放在同一个小世界。", detail: "管理员" };
-    return { name: member?.displayName ?? profileName, initial: member?.initial ?? profileName.slice(0, 1), color: member?.color ?? "#7186a2", role: "真人成员", bio: "与你一起住在一梦间的朋友。个人简介可以稍后慢慢补上。", detail: "受邀成员" };
+    if (member?.role === "admin") return { name: member.displayName, initial: member.initial, color: member.color, role: "真人成员", bio: member.signature || "还没有填写个性签名。", detail: "管理员" };
+    return { name: member?.displayName ?? profileName, initial: member?.initial ?? profileName.slice(0, 1), color: member?.color ?? "#7186a2", role: "真人成员", bio: member?.signature || "还没有填写个性签名。", detail: "受邀成员" };
   })() : null;
   const profileMoments = profileName ? moments.filter(moment => moment.author === profileName) : [];
   const profileLikes = profileMoments.reduce((total, moment) => total + moment.likedBy.length, 0);
@@ -343,7 +360,7 @@ export default function Home() {
     setActive("feed");
     setPassword("");
     setAuthError("");
-    await refreshMoments(true);
+    await Promise.all([refreshMoments(true), refreshCharacters(true)]);
     setToast(`欢迎回来，${user.displayName}`);
   };
 
@@ -505,18 +522,131 @@ export default function Home() {
     } catch (caught) { setToast(caught instanceof Error ? caught.message : "部分角色动态没有发布成功"); }
   };
 
-  const addCharacter = () => {
-    if (!newCharacter.name.trim()) return;
-    const colors = ["#a879a1", "#7186a2", "#c77a68", "#6e8f82"];
-    setCharacters(current => [...current, { id: `char-${Date.now()}`, name: newCharacter.name.trim(), note: newCharacter.description.trim() || "还没有填写角色设定。", color: colors[current.length % colors.length], initial: newCharacter.name.trim().slice(0, 1), enabled: true, book: "无绑定" }]);
-    setNewCharacter({ name: "", description: "", greeting: "" }); setCharacterModal(false); setToast("AI 成员已经创建");
+  const openCreateCharacter = () => {
+    setEditingCharacterId(null);
+    setNewCharacter({ name: "", description: "", greeting: "" });
+    setCharacterModal(true);
   };
 
-  const importCharacter = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const openEditCharacter = (character: Character) => {
+    setEditingCharacterId(character.id);
+    setNewCharacter({ name: character.name, description: character.note, greeting: character.greeting || "" });
+    setCharacterModal(true);
+  };
+
+  const saveCharacter = async () => {
+    if (!newCharacter.name.trim() || characterBusy) return;
+    setCharacterBusy(true);
+    try {
+      if (editingCharacterId) {
+        const existing = characters.find(character => character.id === editingCharacterId);
+        if (!existing) throw new Error("这个角色已经不存在了");
+        const data = await apiRequest<{ character: Character }>("/api/character-action", { method: "POST", body: JSON.stringify({
+          characterId: editingCharacterId,
+          action: "update",
+          name: newCharacter.name,
+          note: newCharacter.description,
+          greeting: newCharacter.greeting,
+          color: existing.color,
+          enabled: existing.enabled,
+          book: existing.book,
+        }) });
+        setCharacters(current => current.map(character => character.id === editingCharacterId ? data.character : character));
+        setToast(`${data.character.name}的资料已保存`);
+      } else {
+        const colors = ["#a879a1", "#7186a2", "#c77a68", "#6e8f82"];
+        const data = await apiRequest<{ character: Character }>("/api/characters", { method: "POST", body: JSON.stringify({
+          name: newCharacter.name,
+          note: newCharacter.description,
+          greeting: newCharacter.greeting,
+          color: colors[characters.length % colors.length],
+          book: "无绑定",
+        }) });
+        setCharacters(current => [...current, data.character]);
+        setSelectedCharacters(current => [...current, data.character.id]);
+        setReplyCharacterIds(current => [...current, data.character.id]);
+        setToast("AI 成员已经创建并保存");
+      }
+      setNewCharacter({ name: "", description: "", greeting: "" });
+      setEditingCharacterId(null);
+      setCharacterModal(false);
+    } catch (caught) {
+      setToast(caught instanceof Error ? caught.message : "角色资料保存失败");
+    } finally {
+      setCharacterBusy(false);
+    }
+  };
+
+  const toggleCharacterEnabled = async (character: Character) => {
+    try {
+      const data = await apiRequest<{ character: Character }>("/api/character-action", { method: "POST", body: JSON.stringify({
+        characterId: character.id,
+        action: "update",
+        name: character.name,
+        note: character.note,
+        greeting: character.greeting || "",
+        color: character.color,
+        enabled: !character.enabled,
+        book: character.book,
+      }) });
+      setCharacters(current => current.map(item => item.id === character.id ? data.character : item));
+      setToast(`${character.name}已${data.character.enabled ? "启用" : "暂停"}并保存`);
+    } catch (caught) {
+      setToast(caught instanceof Error ? caught.message : "角色状态保存失败");
+    }
+  };
+
+  const deleteCharacter = async (character: Character) => {
+    if (!window.confirm(`确定删除“${character.name}”吗？角色资料会从一梦间移除，已经发布的动态会保留。`)) return;
+    try {
+      await apiRequest<{ ok: boolean }>("/api/character-action", { method: "POST", body: JSON.stringify({ characterId: character.id, action: "delete" }) });
+      setCharacters(current => current.filter(item => item.id !== character.id));
+      setSelectedCharacters(current => current.filter(id => id !== character.id));
+      setReplyCharacterIds(current => current.filter(id => id !== character.id));
+      setDrafts(current => current.filter(draft => draft.characterId !== character.id));
+      setReplyDrafts(current => current.filter(draft => draft.characterId !== character.id));
+      setAvatarSources(current => { const next = { ...current }; delete next[character.name]; return next; });
+      if (profileName === character.name) setProfileName(null);
+      setToast(`${character.name}已删除`);
+    } catch (caught) {
+      setToast(caught instanceof Error ? caught.message : "删除角色失败");
+    }
+  };
+
+  const importCharacter = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]; if (!file) return;
     const name = file.name.replace(/\.(json|png)$/i, "") || "导入角色";
-    setCharacters(current => [...current, { id: `import-${Date.now()}`, name, note: "由角色卡导入 · 等待确认设定", color: "#8d7697", initial: name.slice(0, 1), enabled: true, book: "检测卡内世界书" }]);
-    setToast(`已读取 ${file.name} 的导入入口`); event.target.value = "";
+    try {
+      const data = await apiRequest<{ character: Character }>("/api/characters", { method: "POST", body: JSON.stringify({ name, note: "由角色卡导入 · 等待确认设定", color: "#8d7697", book: "检测卡内世界书" }) });
+      setCharacters(current => [...current, data.character]);
+      setSelectedCharacters(current => [...current, data.character.id]);
+      setReplyCharacterIds(current => [...current, data.character.id]);
+      setToast(`${file.name} 已导入并保存`);
+    } catch (caught) {
+      setToast(caught instanceof Error ? caught.message : "角色卡导入失败");
+    }
+    event.target.value = "";
+  };
+
+  const openSignatureEditor = () => {
+    setSignatureDraft(sessionUser?.signature || "");
+    setSignatureModal(true);
+  };
+
+  const saveSignature = async () => {
+    if (!sessionUser || signatureBusy) return;
+    setSignatureBusy(true);
+    try {
+      const data = await apiRequest<{ user: LoginUser }>("/api/profile", { method: "POST", body: JSON.stringify({ signature: signatureDraft }) });
+      setSessionUser(data.user);
+      setAvailableUsers(current => current.map(user => user.id === data.user.id ? data.user : user));
+      setSignatureModal(false);
+      setToast("个性签名已保存");
+    } catch (caught) {
+      setToast(caught instanceof Error ? caught.message : "签名保存失败");
+    } finally {
+      setSignatureBusy(false);
+    }
   };
 
   const testApi = () => {
@@ -613,7 +743,7 @@ export default function Home() {
       <section className="admin-content">
         {active === "generate" && <GeneratePanel characters={characters} selected={selectedCharacters} toggleSelected={toggleCharacterSelection} batchState={batchState} runBatch={runBatch} drafts={drafts} setDrafts={setDrafts} publishDraft={publishDraft} publishAll={publishAllDrafts} avatarSources={avatarSources}/>}
         {active === "replies" && <RepliesPanel moments={moments} characters={characters} selectedMomentId={replyMomentId} selectMoment={selectReplyMoment} selectedCharacters={replyCharacterIds} toggleCharacter={toggleReplyCharacter} batchState={replyBatchState} runBatch={runReplyBatch} drafts={replyDrafts} setDrafts={setReplyDrafts} publishDraft={publishReplyDraft} publishAll={publishAllReplyDrafts} avatarSources={avatarSources}/>}
-        {active === "characters" && <CharactersPanel characters={characters} setCharacters={setCharacters} openCreate={() => setCharacterModal(true)} openImport={() => importRef.current?.click()} avatarSources={avatarSources} openProfile={openProfile}/>}
+        {active === "characters" && <CharactersPanel characters={characters} openCreate={openCreateCharacter} openImport={() => importRef.current?.click()} avatarSources={avatarSources} openProfile={openProfile} editCharacter={openEditCharacter} toggleCharacter={toggleCharacterEnabled} deleteCharacter={deleteCharacter}/>} 
         {active === "worldbook" && <WorldbookPanel entries={worldEntries} setEntries={setWorldEntries} openCreate={() => setWorldModal(true)}/>}
         {active === "api" && <ApiPanel apiBase={apiBase} setApiBase={setApiBase} apiKey={apiKey} setApiKey={setApiKey} model={model} setModel={setModel} state={apiTest} test={testApi}/>}
       </section>
@@ -644,8 +774,10 @@ export default function Home() {
         <div className="profile-stats"><div><strong>{profileMoments.length}</strong><span>动态</span></div><div><strong>{profileLikes}</strong><span>获赞</span></div><div><strong>在线</strong><span>状态</span></div></div>
         <div className="profile-actions">
           {canChangeProfileAvatar && <button type="button" className="profile-main-action" onClick={() => chooseAvatar(profileInfo.name)}><Icon name="image" size={16}/><span>更换头像</span></button>}
+          {isOwnProfile && <button type="button" onClick={openSignatureEditor}><Icon name="edit" size={16}/><span>编辑签名</span></button>}
           {isAdmin && profileInfo.role === "AI 成员" && <button type="button" onClick={() => { setProfileName(null); goTo("generate"); }}><Icon name="wand" size={16}/><span>生成动态</span></button>}
-          {isAdmin && profileInfo.role === "AI 成员" && <button type="button" onClick={() => { setProfileName(null); goTo("characters"); }}><Icon name="edit" size={16}/><span>编辑角色</span></button>}
+          {isAdmin && profileInfo.role === "AI 成员" && <button type="button" onClick={() => { const character = characters.find(item => item.name === profileInfo.name); if (character) openEditCharacter(character); }}><Icon name="edit" size={16}/><span>编辑角色</span></button>}
+          {isAdmin && profileInfo.role === "AI 成员" && <button type="button" className="profile-danger-action" onClick={() => { const character = characters.find(item => item.name === profileInfo.name); if (character) void deleteCharacter(character); }}><Icon name="trash" size={16}/><span>删除角色</span></button>}
           {!canChangeProfileAvatar && <span className="profile-shared-note"><Icon name="shield" size={14}/>你们共同生活在一梦间</span>}
         </div>
         {isOwnProfile && <section className="avatar-display-setting" aria-label="头像显示形状">
@@ -660,7 +792,9 @@ export default function Home() {
 
     {composerOpen && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setComposerOpen(false); }}><section className="modal-card composer-modal panel"><header><div><p className="eyebrow">NEW MOMENT</p><h2>写下这个片刻</h2></div><button className="icon-button" onClick={() => setComposerOpen(false)}><Icon name="close"/></button></header><div className="composer-author"><Avatar initial={currentUser.initial} color={currentUser.color} size="md" src={avatarSources[currentUser.name]}/><div><strong>{currentUser.name}</strong><span>所有受邀成员可见</span></div></div><textarea autoFocus value={composerText} onChange={event => setComposerText(event.target.value)} placeholder="今天发生了什么？" maxLength={600}/><div className="composer-tools"><button type="button"><Icon name="image" size={18}/><span>添加图片</span></button><span>{composerText.length} / 600</span></div><footer><button className="ghost-button" onClick={() => setComposerOpen(false)}>先不写了</button><button className="primary-button" disabled={!composerText.trim()} onClick={publishMoment}><Icon name="send" size={17}/><span>发布朋友圈</span></button></footer></section></div>}
 
-    {characterModal && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setCharacterModal(false); }}><section className="modal-card panel form-modal"><header><div><p className="eyebrow">NEW AI MEMBER</p><h2>创建 AI 成员</h2></div><button className="icon-button" onClick={() => setCharacterModal(false)}><Icon name="close"/></button></header><div className="avatar-seed"><span>{newCharacter.name.slice(0, 1) || "?"}</span><p>头像可在创建后上传</p></div><label><span>角色名</span><input value={newCharacter.name} onChange={event => setNewCharacter(current => ({ ...current, name: event.target.value }))} placeholder="例如：南枝"/></label><label><span>角色设定</span><textarea value={newCharacter.description} onChange={event => setNewCharacter(current => ({ ...current, description: event.target.value }))} placeholder="性格、经历、说话方式、喜好……"/></label><label><span>初次介绍 <small>选填</small></span><input value={newCharacter.greeting} onChange={event => setNewCharacter(current => ({ ...current, greeting: event.target.value }))} placeholder="角色加入时显示的一句话"/></label><footer><button className="ghost-button" onClick={() => setCharacterModal(false)}>取消</button><button className="primary-button" disabled={!newCharacter.name.trim()} onClick={addCharacter}><Icon name="plus" size={17}/><span>创建成员</span></button></footer></section></div>}
+    {characterModal && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) { setCharacterModal(false); setEditingCharacterId(null); } }}><section className="modal-card panel form-modal"><header><div><p className="eyebrow">{editingCharacterId ? "EDIT AI MEMBER" : "NEW AI MEMBER"}</p><h2>{editingCharacterId ? "编辑 AI 成员" : "创建 AI 成员"}</h2></div><button className="icon-button" onClick={() => { setCharacterModal(false); setEditingCharacterId(null); }}><Icon name="close"/></button></header><div className="avatar-seed"><span>{newCharacter.name.slice(0, 1) || "?"}</span><p>{editingCharacterId ? "修改后会保存到云端" : "头像可在创建后上传"}</p></div><label><span>角色名</span><input value={newCharacter.name} onChange={event => setNewCharacter(current => ({ ...current, name: event.target.value }))} placeholder="例如：南枝" maxLength={20}/></label><label><span>角色设定</span><textarea value={newCharacter.description} onChange={event => setNewCharacter(current => ({ ...current, description: event.target.value }))} placeholder="性格、经历、说话方式、喜好……" maxLength={8000}/></label><label><span>初次介绍 <small>选填</small></span><input value={newCharacter.greeting} onChange={event => setNewCharacter(current => ({ ...current, greeting: event.target.value }))} placeholder="角色加入时显示的一句话" maxLength={1000}/></label><footer><button className="ghost-button" onClick={() => { setCharacterModal(false); setEditingCharacterId(null); }}>取消</button><button className="primary-button" disabled={characterBusy || !newCharacter.name.trim()} onClick={saveCharacter}><Icon name={editingCharacterId ? "check" : "plus"} size={17}/><span>{characterBusy ? "正在保存……" : editingCharacterId ? "保存修改" : "创建并保存"}</span></button></footer></section></div>}
+
+    {signatureModal && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setSignatureModal(false); }}><section className="modal-card panel signature-modal"><header><div><p className="eyebrow">PROFILE SIGNATURE</p><h2>编辑个性签名</h2></div><button className="icon-button" onClick={() => setSignatureModal(false)}><Icon name="close"/></button></header><textarea autoFocus value={signatureDraft} onChange={event => setSignatureDraft(event.target.value)} placeholder="写一句想让朋友看到的话……" maxLength={120}/><div className="signature-count">{signatureDraft.length} / 120</div><footer><button className="ghost-button" onClick={() => setSignatureModal(false)}>取消</button><button className="primary-button" disabled={signatureBusy} onClick={saveSignature}><Icon name="check" size={17}/><span>{signatureBusy ? "正在保存……" : "保存签名"}</span></button></footer></section></div>}
 
     {worldModal && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setWorldModal(false); }}><section className="modal-card panel form-modal"><header><div><p className="eyebrow">NEW LORE ENTRY</p><h2>添加世界书条目</h2></div><button className="icon-button" onClick={() => setWorldModal(false)}><Icon name="close"/></button></header><div className="form-grid"><label><span>条目名称</span><input id="world-title" placeholder="例如：雾港的冬天"/></label><label><span>作用范围</span><select id="world-scope"><option>全局</option>{characters.map(character => <option key={character.id}>{character.name}</option>)}</select></label></div><div className="form-grid"><label><span>激活方式</span><select id="world-trigger"><option>关键词</option><option>常驻</option></select></label><label><span>关键词</span><input id="world-keys" placeholder="用逗号分隔"/></label></div><label><span>条目内容</span><textarea id="world-content" placeholder="AI 需要知道的设定、记忆或规则……"/></label><footer><button className="ghost-button" onClick={() => setWorldModal(false)}>取消</button><button className="primary-button" onClick={() => { const title = (document.getElementById("world-title") as HTMLInputElement)?.value || "未命名条目"; const scope = (document.getElementById("world-scope") as HTMLSelectElement)?.value || "全局"; const trigger = (document.getElementById("world-trigger") as HTMLSelectElement)?.value || "关键词"; const keys = (document.getElementById("world-keys") as HTMLInputElement)?.value || "未设置"; const content = (document.getElementById("world-content") as HTMLTextAreaElement)?.value || "等待补充内容"; setWorldEntries(current => [...current, { id: `w-${Date.now()}`, title, scope, trigger, keys, position: "角色设定之后", enabled: true, content }]); setWorldModal(false); setToast("世界书条目已添加"); }}><Icon name="plus" size={17}/><span>保存条目</span></button></footer></section></div>}
 
@@ -738,10 +872,11 @@ function RepliesPanel({ moments, characters, selectedMomentId, selectMoment, sel
   </div>;
 }
 
-function CharactersPanel({ characters, setCharacters, openCreate, openImport, avatarSources, openProfile }: { characters: Character[]; setCharacters: React.Dispatch<React.SetStateAction<Character[]>>; openCreate: () => void; openImport: () => void; avatarSources: Record<string, string>; openProfile: (name: string) => void }) {
+function CharactersPanel({ characters, openCreate, openImport, avatarSources, openProfile, editCharacter, toggleCharacter, deleteCharacter }: { characters: Character[]; openCreate: () => void; openImport: () => void; avatarSources: Record<string, string>; openProfile: (name: string) => void; editCharacter: (character: Character) => void; toggleCharacter: (character: Character) => void; deleteCharacter: (character: Character) => void }) {
   return <div className="admin-page"><AdminHeading eyebrow="AI MEMBERS" title="AI 成员" description="创建自己的角色，或导入酒馆角色卡；每位成员都能绑定独立世界书。" actions={<><button className="secondary-button" onClick={openImport}><Icon name="upload" size={16}/><span>导入角色卡</span></button><button className="primary-button" onClick={openCreate}><Icon name="plus" size={16}/><span>新建成员</span></button></>}/><div className="import-hint panel-soft"><div><Icon name="upload" size={20}/></div><p><strong>兼容导入入口已准备</strong><span>支持选择 SillyTavern JSON / PNG 角色卡。联机版会解析角色描述、性格、场景、示例对话及卡内世界书。</span></p><button onClick={openImport}>选择文件</button></div>
-    <div className="character-table panel"><div className="table-head"><span>成员</span><span>角色设定摘要</span><span>世界书</span><span>状态</span><span/></div>{characters.map(character => <div className="character-row" key={character.id}><button type="button" className="character-cell" onClick={() => openProfile(character.name)}><Avatar initial={character.initial} color={character.color} size="md" online={character.enabled} src={avatarSources[character.name]}/><span><strong>{character.name}</strong><small>AI 成员</small></span></button><p>{character.note}</p><span className="book-chip"><Icon name="book" size={13}/>{character.book}</span><div className="status-cell"><Switch checked={character.enabled} onChange={() => setCharacters(current => current.map(item => item.id === character.id ? { ...item, enabled: !item.enabled } : item))} label={`${character.enabled ? "停用" : "启用"}${character.name}`}/><small>{character.enabled ? "启用" : "暂停"}</small></div><button className="bare-button"><Icon name="more" size={18}/></button></div>)}</div>
-    <div className="character-cards-mobile">{characters.map(character => <article className="panel" key={character.id}><header><button type="button" className="mobile-character-link" onClick={() => openProfile(character.name)}><Avatar initial={character.initial} color={character.color} size="md" online={character.enabled} src={avatarSources[character.name]}/><div><strong>{character.name}</strong><small>{character.book}</small></div></button><Switch checked={character.enabled} onChange={() => setCharacters(current => current.map(item => item.id === character.id ? { ...item, enabled: !item.enabled } : item))} label="切换成员状态"/></header><p>{character.note}</p></article>)}</div>
+    {characters.length === 0 && <div className="empty-characters panel"><Icon name="users" size={27}/><h3>还没有 AI 成员</h3><p>可以新建角色，也可以导入酒馆角色卡。</p><button className="primary-button" type="button" onClick={openCreate}><Icon name="plus" size={16}/><span>新建第一个角色</span></button></div>}
+    {characters.length > 0 && <div className="character-table panel"><div className="table-head"><span>成员</span><span>角色设定摘要</span><span>世界书</span><span>状态</span><span>管理</span></div>{characters.map(character => <div className="character-row" key={character.id}><button type="button" className="character-cell" onClick={() => openProfile(character.name)}><Avatar initial={character.initial} color={character.color} size="md" online={character.enabled} src={avatarSources[character.name]}/><span><strong>{character.name}</strong><small>AI 成员</small></span></button><p>{character.note}</p><span className="book-chip"><Icon name="book" size={13}/>{character.book}</span><div className="status-cell"><Switch checked={character.enabled} onChange={() => toggleCharacter(character)} label={`${character.enabled ? "停用" : "启用"}${character.name}`}/><small>{character.enabled ? "启用" : "暂停"}</small></div><div className="character-actions"><button type="button" onClick={() => editCharacter(character)} aria-label={`编辑${character.name}`}><Icon name="edit" size={16}/><span>编辑</span></button><button type="button" className="danger" onClick={() => deleteCharacter(character)} aria-label={`删除${character.name}`}><Icon name="trash" size={16}/><span>删除</span></button></div></div>)}</div>}
+    {characters.length > 0 && <div className="character-cards-mobile">{characters.map(character => <article className="panel" key={character.id}><header><button type="button" className="mobile-character-link" onClick={() => openProfile(character.name)}><Avatar initial={character.initial} color={character.color} size="md" online={character.enabled} src={avatarSources[character.name]}/><div><strong>{character.name}</strong><small>{character.book}</small></div></button><Switch checked={character.enabled} onChange={() => toggleCharacter(character)} label="切换成员状态"/></header><p>{character.note}</p><footer><button type="button" onClick={() => editCharacter(character)}><Icon name="edit" size={15}/><span>编辑并保存</span></button><button type="button" className="danger" onClick={() => deleteCharacter(character)}><Icon name="trash" size={15}/><span>删除角色</span></button></footer></article>)}</div>}
   </div>;
 }
 
