@@ -346,3 +346,41 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .logout-button { width:34px; height:34px; }
   .empty-feed { min-height:180px; padding:26px 20px; }
 }
+
+/* Saved profiles and explicit AI member management */
+.table-head,.character-row { grid-template-columns:190px minmax(210px,1fr) 150px 95px 132px; }
+.character-actions { display:flex; align-items:center; justify-content:flex-end; gap:5px; }
+.character-actions button,.character-cards-mobile footer button {
+  border:1px solid var(--line);
+  background:var(--surface-solid);
+  color:var(--text);
+  border-radius:9px;
+  min-height:32px;
+  padding:6px 8px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:4px;
+  font-size:8px;
+  cursor:pointer;
+}
+.character-actions button.danger,.character-cards-mobile footer button.danger,.profile-actions>button.profile-danger-action { color:#ae4056; border-color:rgba(174,64,86,.24); background:#fff5f6; }
+.character-cards-mobile footer { display:flex; gap:7px; margin-top:12px; padding-top:11px; border-top:1px solid var(--line); }
+.character-cards-mobile footer button { flex:1; }
+.empty-characters { min-height:270px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:30px; }
+.empty-characters>svg { color:var(--accent); }
+.empty-characters h3 { margin:14px 0 6px; font-size:15px; }
+.empty-characters p { margin:0 0 18px; color:var(--muted); font-size:10px; }
+.signature-modal { width:min(510px,100%); }
+.signature-modal>textarea { width:100%; height:130px; margin-top:20px; border:1px solid var(--line-strong); border-radius:13px; background:color-mix(in srgb,var(--canvas-deep) 42%,var(--surface-solid)); color:var(--text); padding:14px; resize:vertical; outline:0; font:14px/1.8 "Songti SC",serif; }
+.signature-count { margin:7px 2px 13px; color:var(--muted); font-size:8px; text-align:right; }
+[data-style="pixel"] .character-actions button,[data-style="pixel"] .character-cards-mobile footer button,[data-style="pixel"] .signature-modal>textarea { border-radius:0; }
+
+@media (max-width:1180px) and (min-width:761px) {
+  .table-head,.character-row { grid-template-columns:165px minmax(180px,1fr) 135px 90px 120px; }
+}
+
+@media (max-width:640px) {
+  .signature-modal>textarea { height:145px; }
+  .profile-actions>button.profile-danger-action { margin-left:auto; }
+}
