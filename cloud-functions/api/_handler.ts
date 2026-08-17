@@ -443,7 +443,11 @@ async function characterAction(request: Request) {
   }
   if (body.action !== "update") return error("未知操作");
   const character = characterPayload(body, existing);
-  await store.setJSON("characters/index.json", list.map(item => item.id === characterId ? character : item));
+  const entries = character.name === existing.name ? null : await readWorldEntries();
+  await Promise.all([
+    store.setJSON("characters/index.json", list.map(item => item.id === characterId ? character : item)),
+    ...(entries ? [store.setJSON("worldbook/index.json", entries.map(entry => entry.scope === existing.name ? { ...entry, scope: character.name } : entry))] : []),
+  ]);
   return responseJson({ character: publicCharacter(character) });
 }
 
