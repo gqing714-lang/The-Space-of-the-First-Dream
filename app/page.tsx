@@ -787,6 +787,7 @@ export default function Home() {
         setCharacters(current => current.map(character => character.id === editingCharacterId ? data.character : character));
         if (data.character.name !== existing.name) {
           setProfileName(current => current === existing.name ? data.character.name : current);
+          setWorldEntries(current => current.map(entry => entry.scope === existing.name ? { ...entry, scope: data.character.name } : entry));
           setAvatarSources(current => {
             if (!current[existing.name]) return current;
             const next = { ...current, [data.character.name]: current[existing.name] };
