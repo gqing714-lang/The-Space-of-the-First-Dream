@@ -8,12 +8,25 @@ type StoredUser = {
   role: Role;
   initial: string;
   color: string;
+  signature?: string;
   passwordHash: string;
   passwordSalt: string;
   createdAt: string;
 };
 
-type PublicUser = Pick<StoredUser, "id" | "displayName" | "role" | "initial" | "color">;
+type PublicUser = Pick<StoredUser, "id" | "displayName" | "role" | "initial" | "color"> & { signature: string };
+
+type StoredCharacter = {
+  id: string;
+  name: string;
+  note: string;
+  greeting: string;
+  color: string;
+  initial: string;
+  enabled: boolean;
+  book: string;
+  createdAt: string;
+};
 
 type Session = {
   userId: StoredUser["id"];
@@ -45,6 +58,11 @@ const encoder = new TextEncoder();
 const store = getStore("yimengjian-data");
 const sessionCookie = "yimeng_session";
 const sessionSeconds = 60 * 60 * 24 * 30;
+const defaultCharacters: StoredCharacter[] = [
+  { id: "nanzhi", name: "南枝", note: "温柔、敏锐，喜欢记录雨天与旧物。", greeting: "", color: "#d7728d", initial: "枝", enabled: true, book: "雾港旧闻", createdAt: "2026-01-01T00:00:00.000Z" },
+  { id: "yuke", name: "雨客", note: "寡言的夜行者，说话短而有画面感。", greeting: "", color: "#5f6f88", initial: "雨", enabled: true, book: "共用世界书", createdAt: "2026-01-01T00:00:01.000Z" },
+  { id: "shisui", name: "时穗", note: "热衷甜点和植物，总能发现小小的好事。", greeting: "", color: "#b784a7", initial: "穗", enabled: true, book: "无绑定", createdAt: "2026-01-01T00:00:02.000Z" },
+];
 
 function responseJson(data: unknown, status = 200, extraHeaders?: HeadersInit) {
   const headers = new Headers(extraHeaders);
@@ -123,6 +141,7 @@ function publicUser(user: StoredUser): PublicUser {
     role: user.role,
     initial: user.initial,
     color: user.color,
+    signature: user.signature || "",
   };
 }
 
@@ -163,6 +182,10 @@ function ensureSameOrigin(request: Request) {
 function cleanName(value: unknown, fallback: string) {
   if (typeof value !== "string") return fallback;
   return value.trim().replace(/[<>\r\n]/g, "").slice(0, 20) || fallback;
+}
+
+function cleanText(value: unknown, maximum: number) {
+  return typeof value === "string" ? value.trim().slice(0, maximum) : "";
 }
 
 function validPassword(value: unknown) {
@@ -233,6 +256,7 @@ async function setup(request: Request) {
     role: "admin",
     initial: adminName.slice(0, 1),
     color: "#c46483",
+    signature: "",
     passwordHash: adminHash,
     passwordSalt: adminSalt,
     createdAt,
@@ -243,6 +267,7 @@ async function setup(request: Request) {
     role: "member",
     initial: friendName.slice(0, 1),
     color: "#7186a2",
+    signature: "",
     passwordHash: friendHash,
     passwordSalt: friendSalt,
     createdAt,
@@ -255,6 +280,81 @@ async function setup(request: Request) {
   await store.setJSON("config/setup.json", { initialized: true, createdAt }, { onlyIfNew: true });
   const session = await createSession(admin);
   return responseJson({ user: publicUser(admin), users: [publicUser(admin), publicUser(friend)] }, 201, { "Set-Cookie": session.cookie });
+}
+
+async function updateProfile(request: Request) {
+  const user = await currentUser(request);
+  if (!user) return error("请先登录", 401);
+  const body = await bodyJson(request);
+  if (typeof body.signature !== "string") return error("签名格式不正确");
+  user.signature = cleanText(body.signature, 120);
+  await store.setJSON(`users/${user.id}.json`, user);
+  return responseJson({ user: publicUser(user) });
+}
+
+async function readCharacters() {
+  let characters = await store.get("characters/index.json", { type: "json", consistency: "strong" }) as StoredCharacter[] | null;
+  if (characters === null) {
+    await store.setJSON("characters/index.json", defaultCharacters, { onlyIfNew: true });
+    characters = await store.get("characters/index.json", { type: "json", consistency: "strong" }) as StoredCharacter[] | null;
+  }
+  return Array.isArray(characters) ? characters : [];
+}
+
+async function characters(request: Request) {
+  const user = await currentUser(request);
+  if (!user) return error("请先登录", 401);
+  return responseJson({ characters: await readCharacters() });
+}
+
+function characterPayload(body: Record<string, unknown>, existing?: StoredCharacter): StoredCharacter {
+  const name = cleanName(body.name, existing?.name || "未命名角色");
+  const color = typeof body.color === "string" && /^#[0-9a-f]{6}$/i.test(body.color)
+    ? body.color
+    : existing?.color || "#8d7697";
+  return {
+    id: existing?.id || `char-${Date.now().toString(36)}-${randomHex(4)}`,
+    name,
+    note: cleanText(body.note, 8_000) || existing?.note || "还没有填写角色设定。",
+    greeting: cleanText(body.greeting, 1_000),
+    color,
+    initial: name.slice(0, 2),
+    enabled: typeof body.enabled === "boolean" ? body.enabled : existing?.enabled ?? true,
+    book: cleanName(body.book, existing?.book || "无绑定"),
+    createdAt: existing?.createdAt || new Date().toISOString(),
+  };
+}
+
+async function createCharacter(request: Request) {
+  const user = await currentUser(request);
+  if (!user) return error("请先登录", 401);
+  if (user.role !== "admin") return error("只有管理员可以管理 AI 成员", 403);
+  const body = await bodyJson(request);
+  if (!cleanText(body.name, 20)) return error("请填写角色名");
+  const list = await readCharacters();
+  const character = characterPayload(body);
+  await store.setJSON("characters/index.json", [...list, character]);
+  return responseJson({ character }, 201);
+}
+
+async function characterAction(request: Request) {
+  const user = await currentUser(request);
+  if (!user) return error("请先登录", 401);
+  if (user.role !== "admin") return error("只有管理员可以管理 AI 成员", 403);
+  const body = await bodyJson(request);
+  const characterId = typeof body.characterId === "string" ? body.characterId : "";
+  const list = await readCharacters();
+  const existing = list.find(item => item.id === characterId);
+  if (!existing) return error("这个角色已经不存在了", 404);
+
+  if (body.action === "delete") {
+    await store.setJSON("characters/index.json", list.filter(item => item.id !== characterId));
+    return responseJson({ ok: true });
+  }
+  if (body.action !== "update") return error("未知操作");
+  const character = characterPayload(body, existing);
+  await store.setJSON("characters/index.json", list.map(item => item.id === characterId ? character : item));
+  return responseJson({ character });
 }
 
 async function login(request: Request) {
@@ -357,11 +457,15 @@ export async function onRequest({ request }: { request: Request }) {
     if (request.method === "GET" && path === "/api/status") return await status();
     if (request.method === "GET" && path === "/api/session") return await session(request);
     if (request.method === "GET" && path === "/api/feed") return await feed(request);
+    if (request.method === "GET" && path === "/api/characters") return await characters(request);
 
     if (request.method !== "GET" && !ensureSameOrigin(request)) return error("请求来源无效", 403);
     if (request.method === "POST" && path === "/api/setup") return await setup(request);
     if (request.method === "POST" && path === "/api/login") return await login(request);
     if (request.method === "POST" && path === "/api/logout") return await logout(request);
+    if (request.method === "POST" && path === "/api/profile") return await updateProfile(request);
+    if (request.method === "POST" && path === "/api/characters") return await createCharacter(request);
+    if (request.method === "POST" && path === "/api/character-action") return await characterAction(request);
     if (request.method === "POST" && path === "/api/posts") return await createPost(request);
     if (request.method === "POST" && path === "/api/post-action") return await postAction(request);
     return error("接口不存在", 404);
