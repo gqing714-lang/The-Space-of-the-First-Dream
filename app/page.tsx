@@ -228,6 +228,16 @@ export default function Home() {
     }
   }, []);
 
+  const refreshMembers = useCallback(async (quiet = false) => {
+    try {
+      const data = await apiRequest<{ users: LoginUser[] }>("/api/members");
+      setAvailableUsers(data.users);
+      setSessionUser(current => current ? data.users.find(user => user.id === current.id) ?? current : current);
+    } catch (caught) {
+      if (!quiet) setToast(caught instanceof Error ? caught.message : "成员资料同步失败");
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
     const boot = async () => {
@@ -246,7 +256,7 @@ export default function Home() {
           setSessionUser(current.user);
           setLoggedIn(true);
           setBootState("ready");
-          await Promise.all([refreshMoments(true), refreshCharacters(true)]);
+          await Promise.all([refreshMoments(true), refreshCharacters(true), refreshMembers(true)]);
         } catch {
           if (active) setBootState("login");
         }
@@ -262,15 +272,15 @@ export default function Home() {
     };
     void boot();
     return () => { active = false; };
-  }, [refreshCharacters, refreshMoments]);
+  }, [refreshCharacters, refreshMembers, refreshMoments]);
 
   useEffect(() => {
     if (!loggedIn) return;
-    const refresh = () => { void refreshMoments(true); };
+    const refresh = () => { void Promise.all([refreshMoments(true), refreshCharacters(true), refreshMembers(true)]); };
     const timer = window.setInterval(refresh, 12_000);
     window.addEventListener("focus", refresh);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); };
-  }, [loggedIn, refreshMoments]);
+  }, [loggedIn, refreshCharacters, refreshMembers, refreshMoments]);
 
   useEffect(() => {
     window.localStorage.setItem("yimeng-style", style);
@@ -360,7 +370,7 @@ export default function Home() {
     setActive("feed");
     setPassword("");
     setAuthError("");
-    await Promise.all([refreshMoments(true), refreshCharacters(true)]);
+    await Promise.all([refreshMoments(true), refreshCharacters(true), refreshMembers(true)]);
     setToast(`欢迎回来，${user.displayName}`);
   };
 
@@ -552,6 +562,16 @@ export default function Home() {
           book: existing.book,
         }) });
         setCharacters(current => current.map(character => character.id === editingCharacterId ? data.character : character));
+        if (data.character.name !== existing.name) {
+          setProfileName(current => current === existing.name ? data.character.name : current);
+          setAvatarSources(current => {
+            if (!current[existing.name]) return current;
+            const next = { ...current, [data.character.name]: current[existing.name] };
+            delete next[existing.name];
+            try { window.localStorage.setItem("yimeng-local-avatars", JSON.stringify(next)); } catch { /* Keep the visible update even if local storage is full. */ }
+            return next;
+          });
+        }
         setToast(`${data.character.name}的资料已保存`);
       } else {
         const colors = ["#a879a1", "#7186a2", "#c77a68", "#6e8f82"];
@@ -605,7 +625,12 @@ export default function Home() {
       setReplyCharacterIds(current => current.filter(id => id !== character.id));
       setDrafts(current => current.filter(draft => draft.characterId !== character.id));
       setReplyDrafts(current => current.filter(draft => draft.characterId !== character.id));
-      setAvatarSources(current => { const next = { ...current }; delete next[character.name]; return next; });
+      setAvatarSources(current => {
+        const next = { ...current };
+        delete next[character.name];
+        try { window.localStorage.setItem("yimeng-local-avatars", JSON.stringify(next)); } catch { /* The cloud deletion still succeeds. */ }
+        return next;
+      });
       if (profileName === character.name) setProfileName(null);
       setToast(`${character.name}已删除`);
     } catch (caught) {
