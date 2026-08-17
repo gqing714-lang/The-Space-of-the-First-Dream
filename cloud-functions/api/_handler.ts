@@ -155,13 +155,9 @@ async function createSession(user: StoredUser) {
 }
 
 function ensureSameOrigin(request: Request) {
-  const origin = request.headers.get("Origin");
-  if (!origin) return true;
-  try {
-    return new URL(origin).host === new URL(request.url).host;
-  } catch {
-    return false;
-  }
+  const fetchSite = request.headers.get("Sec-Fetch-Site");
+  if (fetchSite === "cross-site") return false;
+  return true;
 }
 
 function cleanName(value: unknown, fallback: string) {
